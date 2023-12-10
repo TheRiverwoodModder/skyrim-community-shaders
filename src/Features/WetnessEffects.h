@@ -55,4 +55,7 @@ public:
 
 	virtual void Load(json& o_json);
 	virtual void Save(json& o_json);
+
+	float CalculateWeatherTransitionPercentage(RE::TESWeather* weather, float skyCurrentWeatherPct, float beginFade);
+	float CalculateWetness(RE::TESWeather* weather, RE::Sky* sky);
 };

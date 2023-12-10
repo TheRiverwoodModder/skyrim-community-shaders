@@ -3,11 +3,16 @@
 
 const float MIN_START_PERCENTAGE = 0.05f;
 const float DEFAULT_TRANSITION_PERCENTAGE = 1.0f;
-const float TRANSITION_CURVE_MULTIPLIER = 3.0f;
+const float TRANSITION_CURVE_MULTIPLIER = 2.0f;
 const float TRANSITION_DENOMINATOR = 256.0f;
+const float FOG_POWER_THRESHOLD = 0.5f;
+const float FOG_NEAR_DISTANCE_THRESHOLD = 0.0f;
 const float RAIN_WETNESS = 1.0f;
-const float SNOW_WETNESS = 0.5f;
+const float SNOW_WETNESS = 0.0f;
+const float FOG_WETNESS = 0.5f;
 const float DRY_WETNESS = 0.0f;
+const float DAY = 0.0f;
+const float NIGHT = 1.0f;
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	WetnessEffects::Settings,
@@ -35,8 +40,8 @@ void WetnessEffects::DrawSettings()
 			ImGui::EndTooltip();
 		}
 
-		ImGui::SliderFloat("Max Rain Wetness", &settings.MaxRainWetness, 0.0f, 2.0f);
-		ImGui::SliderFloat("Max Shore Wetness", &settings.MaxShoreWetness, 0.0f, 2.0f);
+		ImGui::SliderFloat("Max Rain Wetness", &settings.MaxRainWetness, 0.0f, 1.0f);
+		ImGui::SliderFloat("Max Shore Wetness", &settings.MaxShoreWetness, 0.0f, 1.0f);
 		ImGui::SliderFloat("Max Darkeness", &settings.MaxDarkness, 1.0f, 2.0f);
 		ImGui::SliderFloat("Max Occlusion", &settings.MaxOcclusion, 0.0f, 1.0f);
 		ImGui::SliderFloat("Min Roughness", &settings.MinRoughness, 0.0f, 1.0f);
@@ -52,6 +57,101 @@ void WetnessEffects::DrawSettings()
 	}
 }
 
+float WetnessEffects::CalculateWeatherTransitionPercentage(RE::TESWeather* weather, float skyCurrentWeatherPct, float beginFade)
+{
+	float weatherTransitionPercentage = DEFAULT_TRANSITION_PERCENTAGE;
+	if (weather) {
+		// Correct if beginFade is zero or negative
+		beginFade = beginFade > 0 ? beginFade : beginFade + TRANSITION_DENOMINATOR;
+		// Wait to start transition until precipitation begins/ends
+		float startPercentage = (TRANSITION_DENOMINATOR - beginFade) * (1.0f / TRANSITION_DENOMINATOR);
+		startPercentage = startPercentage > MIN_START_PERCENTAGE ? startPercentage : MIN_START_PERCENTAGE;
+		float currentPercentage = (skyCurrentWeatherPct - startPercentage) / (1 - startPercentage);
+		weatherTransitionPercentage = std::clamp(currentPercentage, 0.0f, 1.0f);
+	}
+	return weatherTransitionPercentage;
+}
+
+float WetnessEffects::CalculateWetness(RE::TESWeather* weather, RE::Sky* sky)
+{
+	float wetness = DRY_WETNESS;
+	if (weather && sky) {
+		// Figure out the weather type and set the wetness
+		if (weather->data.flags.any(RE::TESWeather::WeatherDataFlag::kRainy)) {
+			// Raining
+			wetness = RAIN_WETNESS;
+			logger::debug("RAIN: Current Weather: {}, Fog Day Near {}, Fog Day Power {}, Fog Night Near {}, Fog Night Power {}, Day wetness {}, Night wetness {}, Wetness {}, DayNightTransition {}", weather->GetFormID(), weather->fogData.dayNear, weather->fogData.dayPower, weather->fogData.nightNear, weather->fogData.nightPower, wetness, wetness, wetness, "n/a");
+		} else if (weather->data.flags.any(RE::TESWeather::WeatherDataFlag::kSnow)) {
+			// Snowing
+			wetness = SNOW_WETNESS;
+			logger::debug("SNOW: Current Weather: {}, Fog Day Near {}, Fog Day Power {}, Fog Night Near {}, Fog Night Power {}, Day wetness {}, Night wetness {}, Wetness {}, DayNightTransition {}", weather->GetFormID(), weather->fogData.dayNear, weather->fogData.dayPower, weather->fogData.nightNear, weather->fogData.nightPower, wetness, wetness, wetness, "n/a");
+		} else if ((weather->fogData.dayNear <= FOG_NEAR_DISTANCE_THRESHOLD && weather->fogData.dayPower <= FOG_POWER_THRESHOLD) ||
+				   (weather->fogData.nightNear <= FOG_NEAR_DISTANCE_THRESHOLD && weather->fogData.nightPower <= FOG_POWER_THRESHOLD)) {
+			// Foggy - could be foggy during day, night, or both
+			float dayWetness = (weather->fogData.dayNear <= FOG_NEAR_DISTANCE_THRESHOLD && weather->fogData.dayPower <= FOG_POWER_THRESHOLD) ? FOG_WETNESS : DRY_WETNESS;
+			float nightWetness = (weather->fogData.nightNear <= FOG_NEAR_DISTANCE_THRESHOLD && weather->fogData.nightPower <= FOG_POWER_THRESHOLD) ? FOG_WETNESS : DRY_WETNESS;
+			// If both, skip interpolating between day and night values
+			if (dayWetness == nightWetness) {
+				wetness = FOG_WETNESS;
+				logger::debug("FOG(both): Current Weather: {}, Fog Day Near {}, Fog Day Power {}, Fog Night Near {}, Fog Night Power {}, Day wetness {}, Night wetness {}, Wetness {}, DayNightTransition {}", weather->GetFormID(), weather->fogData.dayNear, weather->fogData.dayPower, weather->fogData.nightNear, weather->fogData.nightPower, dayWetness, nightWetness, wetness, "n/a");	
+			} else {
+				float DayNightTransition = DEFAULT_TRANSITION_PERCENTAGE;
+				// Set the Day Night Transition with Day = 0, and Night = 1
+				if (auto calendar = RE::Calendar::GetSingleton()) {
+					if (auto currentClimate = sky->currentClimate) {
+						struct tm sunriseBeginTM = currentClimate->timing.sunrise.GetBeginTime();
+						struct tm sunriseEndTM = currentClimate->timing.sunrise.GetEndTime();
+						struct tm sunsetBeginTM = currentClimate->timing.sunset.GetBeginTime();
+						struct tm sunsetEndTM = currentClimate->timing.sunset.GetEndTime();
+						float gameHour = calendar->GetHour();
+						// Skyrim doesn't seem to use seconds, but doing this in seconds just in case
+						int sunriseBeginTime = (sunriseBeginTM.tm_hour * 3600) + (sunriseBeginTM.tm_min * 60) + sunriseBeginTM.tm_sec;
+						int sunriseEndTime = (sunriseEndTM.tm_hour * 3600) + (sunriseEndTM.tm_min * 60) + sunriseEndTM.tm_sec;
+						int sunsetBeginTime = (sunsetBeginTM.tm_hour * 3600) + (sunsetBeginTM.tm_min * 60) + sunsetBeginTM.tm_sec;
+						int sunsetEndTime = (sunsetEndTM.tm_hour * 3600) + (sunsetEndTM.tm_min * 60) + sunsetEndTM.tm_sec;
+						int time = static_cast<int>(gameHour * 3600);
+
+						if (sunsetEndTime > sunsetBeginTime && sunsetBeginTime >= sunriseEndTime && sunriseEndTime > sunriseBeginTime && sunriseBeginTime >= 0) {
+							if ((time - sunriseBeginTime) < 0 || (time - sunsetEndTime) > 0) {
+								// Night
+								DayNightTransition = NIGHT;
+								logger::debug("FOG Night");
+							} else if ((time - sunriseEndTime) <= 0) {
+								// During sunrise, night 1 -> day 0
+								DayNightTransition = 1.0f - (static_cast<float>(time - sunriseBeginTime) / static_cast<float>(sunriseEndTime - sunriseBeginTime));
+								logger::debug("FOG Sunrise");
+							} else if ((time - sunsetBeginTime) < 0) {
+								// During day
+								DayNightTransition = DAY;
+								logger::debug("FOG Day");
+							} else if ((time - sunsetEndTime) <= 0) {
+								// During sunset, day 0 -> night 1
+								DayNightTransition = static_cast<float>(time - sunsetBeginTime) / static_cast<float>(sunsetEndTime - sunsetBeginTime);
+								logger::debug("FOG Sunset");
+							} else {
+								// This should never happen
+								logger::info("This shouldn't happen");
+							}
+						}
+					}
+				}
+				// Handle wetness transition between day and night
+				wetness = std::lerp(dayWetness, nightWetness, DayNightTransition);
+				logger::debug("FOG(mixed): Current Weather: {}, Fog Day Near {}, Fog Day Power {}, Fog Night Near {}, Fog Night Power {}, Day wetness {}, Night wetness {}, Wetness {}, DayNightTransition {}", weather->GetFormID(), weather->fogData.dayNear, weather->fogData.dayPower, weather->fogData.nightNear, weather->fogData.nightPower, dayWetness, nightWetness, wetness, DayNightTransition);	
+			}
+		} else if (weather->data.flags.any(RE::TESWeather::WeatherDataFlag::kCloudy)) {
+			// Cloudy
+			wetness = DRY_WETNESS;
+			logger::debug("CLOUDY: Current Weather: {}, Fog Day Near {}, Fog Day Power {}, Fog Night Near {}, Fog Night Power {}, Day wetness {}, Night wetness {}, Wetness {}, DayNightTransition {}", weather->GetFormID(), weather->fogData.dayNear, weather->fogData.dayPower, weather->fogData.nightNear, weather->fogData.nightPower, wetness, wetness, wetness, "n/a");
+		} else {
+			// Pleasant
+			wetness = DRY_WETNESS;
+			logger::debug("CLEAR: Current Weather: {}, Fog Day Near {}, Fog Day Power {}, Fog Night Near {}, Fog Night Power {}, Day wetness {}, Night wetness {}, Wetness {}, DayNightTransition {}", weather->GetFormID(), weather->fogData.dayNear, weather->fogData.dayPower, weather->fogData.nightNear, weather->fogData.nightPower, wetness, wetness, wetness, "n/a");
+		}
+	}
+	return wetness;
+}
+
 void WetnessEffects::Draw(const RE::BSShader* shader, const uint32_t)
 {
 	if (shader->shaderType.any(RE::BSShader::Type::Lighting)) {
@@ -60,61 +160,34 @@ void WetnessEffects::Draw(const RE::BSShader* shader, const uint32_t)
 			auto context = RE::BSGraphics::Renderer::GetSingleton()->GetRuntimeData().context;
 
 			PerPass data{};
-			data.Wetness = 0;
+			data.Wetness = DRY_WETNESS;
 
 			if (settings.EnableWetnessEffects) {
 				if (auto player = RE::PlayerCharacter::GetSingleton()) {
 					if (auto cell = player->GetParentCell()) {
 						if (!cell->IsInteriorCell()) {
 							if (auto sky = RE::Sky::GetSingleton()) {
-								float weatherTransitionPercentage = DEFAULT_TRANSITION_PERCENTAGE;
-								float wetnessCurrentWeather = 0.0f;
-								float wetnessOutgoingWeather = 0.0f;
 								if (auto currentWeather = sky->currentWeather) {
-									// Fade in gradually after precipitation has started
-									float beginFade = currentWeather->data.precipitationBeginFadeIn;
-									beginFade = beginFade > 0 ? beginFade : beginFade + TRANSITION_DENOMINATOR;
-									float startPercentage = (TRANSITION_DENOMINATOR - beginFade) * (1.0f / TRANSITION_DENOMINATOR);
-									startPercentage = startPercentage > MIN_START_PERCENTAGE ? startPercentage : MIN_START_PERCENTAGE;
-									float currentPercentage = (sky->currentWeatherPct - startPercentage) / (1 - startPercentage);
-									weatherTransitionPercentage = std::clamp(currentPercentage, 0.0f, 1.0f);
+									float weatherTransitionPercentage = DEFAULT_TRANSITION_PERCENTAGE;
+									float wetnessCurrentWeather = CalculateWetness(currentWeather, sky);
+									float wetnessLastWeather = DRY_WETNESS;
 
-									float wetness = 0.0;
-									if (currentWeather->data.flags.any(RE::TESWeather::WeatherDataFlag::kRainy)) {
-										// Currently raining
-										wetnessCurrentWeather = RAIN_WETNESS;
-									} else if (currentWeather->data.flags.any(RE::TESWeather::WeatherDataFlag::kSnow)) {
-										wetnessCurrentWeather = SNOW_WETNESS;
-									} else {
-										wetnessCurrentWeather = DRY_WETNESS;
-									}
-
+									// If there is a lastWeather, figure out what type it is and set the wetness
 									if (auto lastWeather = sky->lastWeather) {
+										wetnessLastWeather = CalculateWetness(lastWeather, sky);
+
+										// If it was raining, wait to transition until precipitation ends, otherwise use the current weather's fade in
 										if (lastWeather->data.flags.any(RE::TESWeather::WeatherDataFlag::kRainy)) {
-											// Was raining before
-											wetnessOutgoingWeather = RAIN_WETNESS;
-
-											// Fade out gradually after precipitation has ended
-											beginFade = lastWeather->data.precipitationBeginFadeIn;
-											beginFade = beginFade > 0 ? beginFade : beginFade + TRANSITION_DENOMINATOR;
-											startPercentage = (TRANSITION_DENOMINATOR - beginFade) * (1.0f / TRANSITION_DENOMINATOR);
-											startPercentage = startPercentage > MIN_START_PERCENTAGE ? startPercentage : MIN_START_PERCENTAGE;
-											currentPercentage = (sky->currentWeatherPct - startPercentage) / (1 - startPercentage);
-											weatherTransitionPercentage = std::clamp(currentPercentage, 0.0f, 1.0f);
-
-										} else if (lastWeather->data.flags.any(RE::TESWeather::WeatherDataFlag::kSnow)) {
-											wetnessOutgoingWeather = SNOW_WETNESS;
+											weatherTransitionPercentage = CalculateWeatherTransitionPercentage(lastWeather, sky->currentWeatherPct, lastWeather->data.precipitationEndFadeOut);
 										} else {
-											wetnessOutgoingWeather = DRY_WETNESS;
+											weatherTransitionPercentage = CalculateWeatherTransitionPercentage(currentWeather, sky->currentWeatherPct, currentWeather->data.precipitationBeginFadeIn);
 										}
+										// Adjust the transition curve to ease in/out of the transition
+										weatherTransitionPercentage = (exp2(TRANSITION_CURVE_MULTIPLIER * log2(weatherTransitionPercentage)));
 									}
 
-									// Adjust the transition curve to ease in/out of the transition
-									weatherTransitionPercentage = (exp2(TRANSITION_CURVE_MULTIPLIER * log2(weatherTransitionPercentage)));
-
-									wetness = std::lerp(wetnessOutgoingWeather, wetnessCurrentWeather, weatherTransitionPercentage);
-
-									data.Wetness = std::clamp(wetness, 0.0f, 1.0f);
+									// Transition between CurrentWeather and LastWeather wetness values
+									data.Wetness = std::lerp(wetnessLastWeather, wetnessCurrentWeather, weatherTransitionPercentage);
 								}
 							}
 						}
