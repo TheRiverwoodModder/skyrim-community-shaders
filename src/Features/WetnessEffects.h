@@ -56,7 +56,7 @@ public:
 	struct alignas(16) PerPass
 	{
 		float Time;
-		uint Raining;
+		float Raining;
 		float Wetness;
 		float PuddleWetness;
 		DirectX::XMFLOAT3X4 DirectionalAmbientWS;

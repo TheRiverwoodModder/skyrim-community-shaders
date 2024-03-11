@@ -3,7 +3,7 @@
 struct PerPassWetnessEffects
 {
 	float Time;
-	uint Raining;
+    float Raining;
 	float Wetness;
 	float PuddleWetness;
 	row_major float3x4 DirectionalAmbientWS;
@@ -175,7 +175,7 @@ float4 GetRainDrops(float3 worldPos, float t, float3 normal)
 				uint3 hash = pcg3d(uint3(gridCurr, timestep));
 				float3 floatHash = float3(hash) * uintToFloat;
 
-				if (floatHash.z < perPassWetnessEffects[0].RaindropChance) {
+                if (floatHash.z < (perPassWetnessEffects[0].RaindropChance * perPassWetnessEffects[0].Raining)) {
 					float2 to_centre = int2(i, j) + floatHash.xy - grid_uv;
 					float dist_sqr = dot(to_centre, to_centre);
 
@@ -214,8 +214,8 @@ float4 GetRainDrops(float3 worldPos, float t, float3 normal)
 		float3 turbulenceNormal = noise(float3(worldPos.xy * perPassWetnessEffects[0].ChaoticRippleScaleRcp, t * perPassWetnessEffects[0].ChaoticRippleSpeed));
 		turbulenceNormal.z = turbulenceNormal.z * .5 + 5;
 		turbulenceNormal = normalize(turbulenceNormal);
-		ripple_normal = normalize(ripple_normal + float3(turbulenceNormal.xy * perPassWetnessEffects[0].ChaoticRippleStrength, 0));
-	}
+        ripple_normal = normalize(ripple_normal + float3(turbulenceNormal.xy * perPassWetnessEffects[0].ChaoticRippleStrength * saturate(perPassWetnessEffects[0].Raining), 0));
+    }
 
 	wetness *= perPassWetnessEffects[0].SplashesStrength;
 
